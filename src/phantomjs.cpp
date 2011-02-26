@@ -29,7 +29,11 @@
 
 #include <QtGui>
 #include <QtWebKit>
+#include <QVariant>
 #include <iostream>
+
+#include "options.h"
+
 
 #if QT_VERSION < QT_VERSION_CHECK(4, 5, 0)
 #error Use Qt 4.5 or later version
@@ -114,7 +118,7 @@ class Phantom: public QObject
     Q_PROPERTY(QVariantMap viewportSize READ viewportSize WRITE setViewportSize)
 
 public:
-    Phantom(QObject *parent = 0);
+    Phantom(Options *options, QObject *parent = 0);
 
     QStringList args() const;
 
@@ -155,9 +159,10 @@ private:
     int m_returnValue;
     QString m_script;
     QString m_state;
+
 };
 
-Phantom::Phantom(QObject *parent)
+Phantom::Phantom(Options *options, QObject *parent )
     : QObject(parent)
     , m_returnValue(0)
 {
@@ -167,9 +172,9 @@ Phantom::Phantom(QObject *parent)
 
     // first argument: program name (phantomjs)
     // second argument: script name
-    m_args = QApplication::arguments();
-    m_args.removeFirst();
-    m_args.removeFirst();
+    m_args = options->args;
+//    m_args.removeFirst();
+//    m_args.removeFirst();
     
     QStringListIterator argIterator(m_args);
     while (argIterator.hasNext()) {
@@ -379,23 +384,26 @@ QVariantMap Phantom::viewportSize() const
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::cerr << "phantomjs script.js" << std::endl << std::endl;
-        return 1;
+    QApplication app(argc, argv);
+    Options options;
+
+    if(!options.proxy.isEmpty() && !options.port.isEmpty()){
+        QNetworkProxy proxy(QNetworkProxy::HttpProxy, options.proxy.toAscii(), options.port.toInt());
+        QNetworkProxy::setApplicationProxy(proxy);
+    }
+    else {
+        QNetworkProxyFactory::setUseSystemConfiguration(true);
     }
 
-    QNetworkProxyFactory::setUseSystemConfiguration(true);
-
-    QApplication app(argc, argv);
-
-    app.setWindowIcon(QIcon(":/phantomjs-icon.png"));
+    //app.setWindowIcon(QIcon(":/phantomjs-icon.png"));
     app.setApplicationName("PhantomJS");
     app.setOrganizationName("Ofi Labs");
     app.setOrganizationDomain("www.ofilabs.com");
     app.setApplicationVersion(PHANTOMJS_VERSION_STRING);
 
-    Phantom phantom;
-    phantom.execute(QString::fromLocal8Bit(argv[1]));
+
+    Phantom phantom(&options);
+    phantom.execute(options.file);
     app.exec();
     return phantom.returnValue();
 }
