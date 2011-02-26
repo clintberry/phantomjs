@@ -29,16 +29,20 @@
 
 #include <QtGui>
 #include <QtWebKit>
+#include <QVariant>
 #include <iostream>
 
-#if QT_VERSION < QT_VERSION_CHECK(4, 7, 0)
-#error Use Qt 4.7 or later version
+#include "options.h"
+
+
+#if QT_VERSION < QT_VERSION_CHECK(4, 5, 0)
+#error Use Qt 4.5 or later version
 #endif
 
 #define PHANTOMJS_VERSION_MAJOR  1
-#define PHANTOMJS_VERSION_MINOR  0
+#define PHANTOMJS_VERSION_MINOR  1
 #define PHANTOMJS_VERSION_PATCH  0
-#define PHANTOMJS_VERSION_STRING "1.0.0"
+#define PHANTOMJS_VERSION_STRING "1.1.0"
 
 class WebPage: public QWebPage
 {
@@ -53,9 +57,12 @@ protected:
     void javaScriptAlert(QWebFrame *originatingFrame, const QString &msg);
     void javaScriptConsoleMessage(const QString &message, int lineNumber, const QString &sourceID);
     QString userAgentForUrl(const QUrl &url) const;
+    QString chooseFile (QWebFrame * parentFrame, const QString & suggestedFile );
 
 private:
     QString m_userAgent;
+    QMap<QString, QString> m_allowedFiles;
+    QString m_nextFileTag;
     friend class Phantom;
 };
 
@@ -90,6 +97,15 @@ QString WebPage::userAgentForUrl(const QUrl &url) const
     return m_userAgent;
 }
 
+QString WebPage::chooseFile (QWebFrame * parentFrame, const QString & suggestedFile )
+{
+    Q_UNUSED(parentFrame);
+    Q_UNUSED(suggestedFile);
+    if (m_allowedFiles.contains(m_nextFileTag))
+        return m_allowedFiles.value(m_nextFileTag);
+    return NULL;
+}
+
 class Phantom: public QObject
 {
     Q_OBJECT
@@ -102,7 +118,7 @@ class Phantom: public QObject
     Q_PROPERTY(QVariantMap viewportSize READ viewportSize WRITE setViewportSize)
 
 public:
-    Phantom(QObject *parent = 0);
+    Phantom(Options *options, QObject *parent = 0);
 
     QStringList args() const;
 
@@ -128,6 +144,7 @@ public:
 public slots:
     void exit(int code = 0);
     void open(const QString &address);
+    void setFormInputFile(QWebElement el, const QString &fileTag);
     bool render(const QString &fileName);
     void sleep(int ms);
 
@@ -142,9 +159,10 @@ private:
     int m_returnValue;
     QString m_script;
     QString m_state;
+
 };
 
-Phantom::Phantom(QObject *parent)
+Phantom::Phantom(Options *options, QObject *parent )
     : QObject(parent)
     , m_returnValue(0)
 {
@@ -154,18 +172,38 @@ Phantom::Phantom(QObject *parent)
 
     // first argument: program name (phantomjs)
     // second argument: script name
-    m_args = QApplication::arguments();
-    m_args.removeFirst();
-    m_args.removeFirst();
+    m_args = options->args;
+//    m_args.removeFirst();
+//    m_args.removeFirst();
+    
+    QStringListIterator argIterator(m_args);
+    while (argIterator.hasNext()) {
+        const QString &arg = argIterator.next();
+        if (arg.startsWith("--upload-file") && argIterator.hasNext()) {
+            const QString &fileInfoString = argIterator.next();
+            QStringList fileInfo = fileInfoString.split("=");
+            const QString &tag = fileInfo.at(0);
+            const QString &fileName = fileInfo.at(1);
+            m_page.m_allowedFiles[tag] = fileName;
+        }
+    }
 
     connect(m_page.mainFrame(), SIGNAL(javaScriptWindowObjectCleared()), SLOT(inject()));
     connect(&m_page, SIGNAL(loadFinished(bool)), this, SLOT(finish(bool)));
 
-    m_page.settings()->setAttribute(QWebSettings::FrameFlatteningEnabled, true);
     m_page.settings()->setAttribute(QWebSettings::OfflineStorageDatabaseEnabled, true);
+    m_page.settings()->setOfflineStoragePath(QDesktopServices::storageLocation(QDesktopServices::DataLocation));
+
+    m_page.settings()->setAttribute(QWebSettings::LocalStorageDatabaseEnabled, true);
+
+#if QT_VERSION >= QT_VERSION_CHECK(4, 7, 0)
+    m_page.settings()->setAttribute(QWebSettings::FrameFlatteningEnabled, true);
+#endif
+
+#if QT_VERSION >= QT_VERSION_CHECK(4, 6, 0)
     m_page.settings()->setAttribute(QWebSettings::LocalStorageEnabled, true);
     m_page.settings()->setLocalStoragePath(QDesktopServices::storageLocation(QDesktopServices::DataLocation));
-    m_page.settings()->setOfflineStoragePath(QDesktopServices::storageLocation(QDesktopServices::DataLocation));
+#endif
 
     // Ensure we have document.body.
     m_page.mainFrame()->setHtml("<html><body></body></html>");
@@ -198,8 +236,12 @@ void Phantom::execute(const QString &fileName)
         exit(1);
         return;
     }
-    m_script = file.readAll();
+    m_script =  QString::fromUtf8(file.readAll());
     file.close();
+    
+    if (m_script.startsWith("#!")) {
+        m_script.prepend("//");
+    }
 
     m_page.mainFrame()->evaluateJavaScript(m_script);
 }
@@ -253,8 +295,8 @@ bool Phantom::render(const QString &fileName)
     if (pageSize.isEmpty())
         return false;
 
-    QImage buffer(pageSize, QImage::Format_ARGB32_Premultiplied);
-    buffer.fill(Qt::transparent);
+    QImage buffer(pageSize, QImage::Format_ARGB32);
+    buffer.fill(qRgba(255, 255, 255, 0));
     QPainter p(&buffer);
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setRenderHint(QPainter::TextAntialiasing, true);
@@ -280,6 +322,17 @@ void Phantom::sleep(int ms)
             break;
     }
 }
+
+
+void Phantom::setFormInputFile(QWebElement el, const QString &fileTag) {
+    m_page.m_nextFileTag = fileTag;
+    el.evaluateJavaScript("(function(target){  \
+                          var evt = document.createEvent('MouseEvents'); \
+                          evt.initMouseEvent(\"click\", true, true, window, \
+                          0, 0, 0, 0, 0, false, false, false, false, 0, null); \
+                          target.dispatchEvent(evt);})(this);");
+}
+
 
 void Phantom::setState(const QString &value)
 {
@@ -331,21 +384,26 @@ QVariantMap Phantom::viewportSize() const
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::cerr << "phantomjs script.js" << std::endl << std::endl;
-        return 1;
+    QApplication app(argc, argv);
+    Options options;
+
+    if(!options.proxy.isEmpty() && !options.port.isEmpty()){
+        QNetworkProxy proxy(QNetworkProxy::HttpProxy, options.proxy.toAscii(), options.port.toInt());
+        QNetworkProxy::setApplicationProxy(proxy);
+    }
+    else {
+        QNetworkProxyFactory::setUseSystemConfiguration(true);
     }
 
-    QApplication app(argc, argv);
-
-    app.setWindowIcon(QIcon(":/phantomjs-icon.png"));
+    //app.setWindowIcon(QIcon(":/phantomjs-icon.png"));
     app.setApplicationName("PhantomJS");
     app.setOrganizationName("Ofi Labs");
     app.setOrganizationDomain("www.ofilabs.com");
     app.setApplicationVersion(PHANTOMJS_VERSION_STRING);
 
-    Phantom phantom;
-    phantom.execute(QString::fromLocal8Bit(argv[1]));
+
+    Phantom phantom(&options);
+    phantom.execute(options.file);
     app.exec();
     return phantom.returnValue();
 }
