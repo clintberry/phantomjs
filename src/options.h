@@ -1,6 +1,3 @@
-#ifndef TEST_H
-#define TEST_H
-
 #include <QObject>
 #include "qcommandline.h"
 
@@ -21,5 +18,3 @@ public slots:
  private:
     QCommandLine *cmdline;
 };
-
-#endif
